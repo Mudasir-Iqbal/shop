@@ -33,8 +33,9 @@ def send_whatsapp_message(to: str, text: str):
         "type": "text",
         "text": {"body": text}
     }
-    requests.post(url, headers=headers, json=payload)
-
+    res = requests.post(url, headers=headers, json=payload)
+    print(f"Meta Send Status: {res.status_code} | Body: {res.text}")
+    
 def download_whatsapp_media(media_id: str) -> bytes:
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
