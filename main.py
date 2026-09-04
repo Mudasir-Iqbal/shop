@@ -1,11 +1,12 @@
 import os
+from dotenv import load_dotenv
 import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import requests
 from fastapi import FastAPI, Request
 import google.generativeai as genai
-
+load_dotenv()
 app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
