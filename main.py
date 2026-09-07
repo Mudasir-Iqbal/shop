@@ -2,7 +2,7 @@
 Pamir Auto Parts — WhatsApp Bot & Store API (main.py)
 Integrates:
 - WhatsApp Cloud API + Meta Webhooks
-- Gemini 1.5 Flash (Vision & Function Calling)
+- Gemini 3.5 Flash (Vision & Function Calling)
 - Supabase / PostgreSQL v6 Database Schema
 - Frontend REST APIs for Web Interface
 """
@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
+from file_processor import process_part_image, process_vendor_document
 
 load_dotenv()
 
@@ -831,12 +832,12 @@ Rules:
 4. Low stock ya dead stock ki details sirf tab dein jab user specifically poochay."""
 
 model = genai.GenerativeModel(
-    "gemini-1.5-flash",
+    "gemini-3.5-flash",
     tools=TOOLS,
     system_instruction=SYSTEM_PROMPT,
 )
 
-vision_model = genai.GenerativeModel("gemini-1.5-flash")
+vision_model = genai.GenerativeModel("gemini-3.5-flash")
 
 def run_gemini_turn(phone: str, user_text: str) -> str:
     sess = load_session(phone)
@@ -1175,3 +1176,66 @@ def api_today_sales():
         return {"count": len(sales), "sales": sales}
     finally:
         conn.close()
+
+
+def process_whatsapp_payload(data: dict):
+    try:
+        entry = data.get("entry", [])[0]["changes"][0]["value"]
+        if "messages" not in entry:
+            return
+
+        msg = entry["messages"][0]
+        sender = msg["from"]
+        msg_type = msg.get("type")
+
+        # 1. IMAGE PROCESSING (Photo / Packing / Label)
+        if msg_type == "image":
+            img_bytes = download_whatsapp_media(msg["image"]["id"])
+            caption = (msg["image"].get("caption") or "").strip()
+            
+            conn = get_db()
+            try:
+                # Agar caption me list/rate/invoice likha ho to Vendor mode, warna Part OCR
+                if any(w in caption.lower() for w in ["list", "rate", "invoice", "vendor", "bill"]):
+                    vendor_hint = caption.split()[0] if caption else "Vendor"
+                    reply = process_vendor_document(img_bytes, "image/jpeg", vendor_hint, conn)
+                else:
+                    reply = process_part_image(img_bytes, conn)
+            finally:
+                conn.close()
+
+            send_whatsapp_message(sender, reply)
+            return
+
+        # 2. DOCUMENT PROCESSING (PDF / Invoices)
+        if msg_type == "document":
+            doc = msg["document"]
+            file_bytes = download_whatsapp_media(doc["id"])
+            caption = (doc.get("caption") or "").strip()
+            mime_type = doc.get("mime_type", "application/pdf")
+            vendor_hint = caption.split()[0] if caption else "Vendor"
+
+            conn = get_db()
+            try:
+                reply = process_vendor_document(file_bytes, mime_type, vendor_hint, conn)
+            finally:
+                conn.close()
+
+            send_whatsapp_message(sender, reply)
+            return
+
+        # 3. TEXT PROCESSING
+        if msg_type != "text":
+            return
+
+        text = msg["text"]["body"].strip()
+
+        if text.lower() in ("undo", "undo karo", "wapis karo"):
+            send_whatsapp_message(sender, try_undo(sender))
+            return
+
+        reply = run_gemini_turn(sender, text)
+        send_whatsapp_message(sender, reply)
+
+    except Exception as e:
+        print(f"Async WhatsApp processing error: {e}")
