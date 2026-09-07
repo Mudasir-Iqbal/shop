@@ -839,39 +839,78 @@ model = genai.GenerativeModel(
 
 vision_model = genai.GenerativeModel("gemini-3.5-flash")
 
+def extract_text_safely(response) -> str:
+    """Helper function to extract plain text without triggering SDK conversion errors."""
+    try:
+        if not response.candidates:
+            return ""
+        candidate = response.candidates[0]
+        text_parts = []
+        for part in candidate.content.parts:
+            # Sirf tab text uthao jab function_call ya function_response na ho
+            if not part.function_call and not part.function_response and hasattr(part, "text") and part.text:
+                text_parts.append(part.text)
+        return "\n".join(text_parts).strip()
+    except Exception as e:
+        print(f"Error extracting text: {e}")
+        return ""
+
+
 def run_gemini_turn(phone: str, user_text: str) -> str:
     sess = load_session(phone)
-    history = sess["history"][-20:]
+    # Chat session restore karte waqt sirf string history load karein
+    history = sess.get("history", [])[-20:]
 
     chat = model.start_chat(history=history)
     response = chat.send_message(user_text)
 
     try:
-        part = response.candidates[0].content.parts[0]
-    except (IndexError, AttributeError):
+        if not response.candidates:
+            return "Koi response nahi mila, dobara try karein."
+        candidate = response.candidates[0]
+        parts = candidate.content.parts
+    except (IndexError, AttributeError) as e:
+        print(f"Response parsing error: {e}")
         return "Message samajh nahi aa saka, dobara koshish karein."
 
-    if hasattr(part, "function_call") and part.function_call and part.function_call.name:
-        fn_name = part.function_call.name
-        fn_args = dict(part.function_call.args)
+    # Function calling check
+    function_call_part = next((p for p in parts if p.function_call and p.function_call.name), None)
+
+    if function_call_part:
+        fn_name = function_call_part.function_call.name
+        fn_args = dict(function_call_part.function_call.args)
         handler = TOOL_MAP.get(fn_name)
-        
+
         raw_result = handler({**fn_args}, {"phone": phone}) if handler else {"error": "Tool mojood nahi hai."}
         safe_result = sanitize_for_gemini(raw_result)
 
+        # Tool output wapis model ko bhein
         response2 = chat.send_message(
             genai.protos.Content(parts=[genai.protos.Part(
                 function_response=genai.protos.FunctionResponse(name=fn_name, response={"result": safe_result})
             )])
         )
-        final_text = response2.text
+        final_text = extract_text_safely(response2)
+        if not final_text:
+            final_text = "Task mukammal ho gaya."
     else:
-        final_text = response.text
+        final_text = extract_text_safely(response)
+        if not final_text:
+            final_text = "Main samajh nahi saka, barah-e-karam dobara likhein."
 
-    new_history = [{"role": m.role, "parts": [p.text for p in m.parts if hasattr(p, "text") and p.text]} for m in chat.history]
-    save_session(phone, new_history)
+    # History save karte waqt SDK conversion crash se bachne ke liye safe extraction
+    safe_history = []
+    for m in chat.history:
+        parts_text = []
+        for p in m.parts:
+            # SDK property access ke bajaye safe string check
+            if not p.function_call and not p.function_response and hasattr(p, "text") and p.text:
+                parts_text.append(p.text)
+        if parts_text:
+            safe_history.append({"role": m.role, "parts": parts_text})
+
+    save_session(phone, safe_history)
     return final_text
-
 
 # =====================================================================
 # FAST UNDO HANDLER
